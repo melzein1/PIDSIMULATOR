@@ -1,6 +1,6 @@
 # PIDSIMULATOR
 
-PID Simulator to help teach the concept of PID Control Engineering. This project is a small interactive simulator written for the Processing IDE that demonstrates a single-joint robot arm controlled by a PID controller. It includes realtime visualization of the arm, a time‑series plot (angle vs time), and a Bode‑plot analysis tool for frequency‑domain insight.
+PID Simulator to help teach the concept of PID Control Engineering. This project is a small interactive simulator written for the Processing IDE that demonstrates a single-joint robot arm controlled by a PID controller. It includes realtime visualization of the arm, a time‑series plot (angle vs time), and a Bode‑plot / Nyquist analysis tool for frequency‑domain insight.
 
 ## What this is
 A simple, interactive educational simulator that lets you experiment with PID gains and plant parameters for a pendulum/robot‑arm-like system and see the effects in both time and frequency domains.
@@ -14,10 +14,16 @@ A simple, interactive educational simulator that lets you experiment with PID ga
 ```
 PID_Controller_Visual_Example_Bode_V2.pde   # Main program (all code in one .pde)
 README.md                                   # This file
+Bode.png                                    # Example Bode screenshot
+Nyquist-open.png                             # Nyquist open-loop example
+Nyquist-closed.png                            # Nyquist closed-loop example
+UI-full.png                                   # Full-window hero image
+resp-step.png                                 # Time-response example
+controls-closeup.png                           # Control panel close-up
 ```
 
 How it fits together:
-- The single .pde file contains the whole program: model, controller, plotting, UI, and the Bode analysis routine. The main draw loop applies the PID control law, steps the physical model (ArmSim), and updates/plots the results.
+- The single .pde file contains the whole program: model, controller, plotting, UI, and the Bode/Nyquist analysis routine. The main draw loop applies the PID control law, steps the physical model (ArmSim), and updates/plots the results.
 
 ## Main components (in the code)
 - ArmSim — lightweight physical model for the arm:
@@ -81,15 +87,46 @@ Notes:
 - Run Bode and sweep frequencies to see where the closed‑loop gain drops and how phase margin appears.
 
 ## Screenshots and images
-Screenshots are very helpful for newcomers (UI layout, time‑response example, and a Bode result). I can't run Processing in this environment to capture screenshots automatically. I can:
-- Add placeholders and instructions in the README showing where to put screenshots (recommended locations: `docs/images/`), or
-- If you want, I can update the README now and you can supply screenshots (upload them here) and I will add them to the repo and the README, or
-- If you prefer, tell me a target image size and I will create simple illustrative placeholder images and commit them (but they won't be real captures).
+Screenshots are very helpful for newcomers (UI layout, time‑response example, and frequency‑domain plots). Images have been added to the repository; examples below are embedded at full resolution for clarity.
 
-Tell me which option you prefer and I will update the repository accordingly.
+UI / full window (hero):
+
+![Full UI window](https://raw.githubusercontent.com/melzein1/PIDSIMULATOR/main/UI-full.png)
+
+Caption: "PID Simulator — controls, realtime time-plot, Bode & Nyquist panels, and visual arm."
+
+Time response (step / sine):
+
+![Time response (step)](https://raw.githubusercontent.com/melzein1/PIDSIMULATOR/main/resp-step.png)
+
+Caption: "Time response — step / sine response showing system behavior and HUD."
+
+Bode (magnitude & phase):
+
+![Bode: plant and closed-loop](https://raw.githubusercontent.com/melzein1/PIDSIMULATOR/main/Bode.png)
+
+Caption: "Bode plot: plant (gray) and closed-loop (blue) magnitude & phase, linearized at θ = 30°." 
+
+Nyquist (open-loop):
+
+![Nyquist open-loop](https://raw.githubusercontent.com/melzein1/PIDSIMULATOR/main/Nyquist-open.png)
+
+Caption: "Nyquist (open-loop) — classical -1 + j0 point marked."
+
+Nyquist (closed-loop):
+
+![Nyquist closed-loop](https://raw.githubusercontent.com/melzein1/PIDSIMULATOR/main/Nyquist-closed.png)
+
+Caption: "Nyquist (closed-loop) — shows T(jω) loops."
+
+Control panel close-up:
+
+![Control panel close-up](https://raw.githubusercontent.com/melzein1/PIDSIMULATOR/main/controls-closeup.png)
+
+Caption: "Control panel: PID and plant parameters (edit and run)."
 
 ## Development notes (for contributors)
-- The entire application is in one .pde file. Refactoring into multiple files (e.g., ArmSim.pde, PID.pde, Plot.pde, ui/ widgets) would make it easier to maintain and test.
+- The entire application is in one .pde file. Refactoring into multiple files (e.g., ArmSim.pde, PID.pde, Plot.pde, UI.pde) would make it easier to maintain and test.
 - The PID derivative uses a simple lerp low‑pass (pid.derivLPF); if you want a time‑constant approach, consider switching to an explicit RC filter using dt.
 
 ## Try asking
@@ -99,4 +136,4 @@ Tell me which option you prefer and I will update the repository accordingly.
 
 ---
 
-(Updated README to provide newcomers a clear starting point. If you want, I can commit a second change adding screenshots—upload them here or tell me you want placeholders and I will create and add them.)
+(Updated README to include screenshots and usage notes.)
