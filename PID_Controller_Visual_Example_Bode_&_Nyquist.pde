@@ -1,5 +1,5 @@
 /**
- * PID Robot Arm Simulator — Bode + Nyquist Analysis v1.5.1
+ * PID Robot Arm Simulator — Bode + Nyquist Analysis \
  *
  * By: Mohammad Elzein 08/15/2025
  * Changes
