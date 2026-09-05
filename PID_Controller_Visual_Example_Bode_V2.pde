@@ -1,27 +1,47 @@
 /**
- * PID Robot Arm Simulator — Bode Analysis v1.2 (clean)
+ * PID Robot Arm Simulator — Bode + Nyquist Analysis v1.5.1
  *
  * By: Mohammad Elzein 08/15/2025
  * Changes
  *  - Spring is tied to TARGET angle: τspring = −k(θ − θ_target)
  *  - New input: Arm Length (m); payload distance clamped ≤ L
- *  - Left panel auto‑compacts and supports mouse‑wheel scrolling
+ *  - Left panel uses a true scrollable viewport with wheel + draggable scrollbar
  *  - Time plot: adaptive Y range over last 10 s with nice ticks
  *  - Bode plot: cleaned background, Y‑axis labels for dB/deg
+ *  - Nyquist plot can toggle between open-loop L(jw) and closed-loop T(jw)
+ *  - Bode linearization angle is now an active, single-angle input
+ *  - Resize-safe window handling: native maximize + taskbar-safe F toggle
  */
 
 import processing.event.MouseEvent;
+import processing.awt.PSurfaceAWT;
+import java.awt.Frame;
+import java.awt.Rectangle;
+import java.awt.Insets;
+import java.awt.GraphicsEnvironment;
 
-// ---------- Window / fullscreen (no settings()) ----------
-boolean fillScreenToggle = false; // runtime fill‑screen (resizable window)
+// ---------- Window / resize handling ----------
+boolean fillScreenToggle = false; // runtime "fit to usable desktop" mode
 boolean fLatch = false;           // debounce for F key
 final int WINDOW_W = 1200, WINDOW_H = 800;
 
+// F-mode restores only through Processing's surface API.  We intentionally do
+// NOT change the native Frame maximize state or call Frame.setBounds().
+int savedContentW = WINDOW_W, savedContentH = WINDOW_H;
+int savedWindowX = -1, savedWindowY = -1;
+long lastWindowToggleMs = -1000;
+
+// Resize debounce: native Windows maximize can report several intermediate
+// drawable sizes.  Wait until the size is stable before rebuilding the layout.
+int observedW = -1, observedH = -1;
+int resizeStableFrames = 0;
+final int RESIZE_SETTLE_FRAMES = 3;
+
 // ---------- Globals ----------
-ArmSim sim; PID pid; Plot plot; HUD hud; BodePlot bode;
+ArmSim sim; PID pid; Plot plot; HUD hud; BodePlot bode; NyquistPlot nyquist;
 ArrayList<InputField> fields = new ArrayList<InputField>();
 Button btnReset, btnZeroI, btnDisturb;
-Button btnStepUp, btnStepDown, btnSineToggle, btnRunBode;
+Button btnStepUp, btnStepDown, btnSineToggle, btnRunBode, btnNyquistMode;
 InputField fKp, fKi, fKd, fTarget, fArmLen, fMass, fPayload, fPayloadDist, fDrag, fSpring, fTlim;
 InputField fAmp, fFreq, fCenter;
 InputField fBodeFreq, fBodeAngle;
@@ -33,8 +53,12 @@ float armCX, armCY;            // arm center
 float uiScale = 1;             // global UI scale factor
 
 // panel scrolling support
-float panelScroll = 0;   // 0 = top; negative scrolls upward
-float panelScrollMin = 0; // most negative allowed (computed in layout)
+float panelScroll = 0;       // 0 = top; negative scrolls upward
+float panelScrollMin = 0;    // most negative allowed (computed in layout)
+float panelViewTop, panelViewBottom, panelViewH, panelContentH;
+float panelScrollBarX, panelScrollBarW;
+boolean panelScrollDragging = false;
+float panelScrollDragOffset = 0;
 
 // PID term visualization
 float pTerm=0, iTerm=0, dTermOut=0, uCmd=0, uSat=0;
@@ -46,11 +70,17 @@ float freqHz = 0.5;    // sine frequency
 float centerDeg;       // sine center
 float simTime = 0;     // seconds
 
+void settings() {
+  // Create the renderer at the intended size from the start.  This is much
+  // more reliable during native Windows maximize/restore than resizing the
+  // default 100x100 Processing surface from setup().
+  size(WINDOW_W, WINDOW_H, JAVA2D);
+  smooth(4);
+}
+
 void setup() {
   surface.setResizable(true);
-  surface.setSize(WINDOW_W, WINDOW_H);
   centerWindow(WINDOW_W, WINDOW_H);
-  smooth(8);
 
   // Model defaults
   float L = 0.5; // m
@@ -88,13 +118,14 @@ void setup() {
 
   // Bode controls (ranges as text "a-b")
   fBodeFreq  = mkField("Bode Freq (Hz a-b)", 0,0, 140,38, "0.1-10");
-  fBodeAngle = mkField("Bode Angle (deg a-b)",0,0,140,38, "1-20");
+  fBodeAngle = mkField("Bode Lin. Angle (deg)",0,0,140,38, nf(sim.targetDeg, 0, 1));
 
   // Buttons
   btnStepUp     = new Button("Step +10°",     0,0, 160,40);
   btnStepDown   = new Button("Step −10°",     0,0, 160,40);
   btnSineToggle = new Button("Sine: OFF",     0,0, 160,40);
-  btnRunBode    = new Button("Run Bode",      0,0, 160,40);
+  btnRunBode    = new Button("Run Bode & Nyquist ",      0,0, 160,40);
+  btnNyquistMode = new Button("Nyquist: OPEN LOOP", 0,0, 160,40);
   btnReset      = new Button("Reset",         0,0, 160,40);
   btnZeroI      = new Button("Zero Integral", 0,0, 160,40);
   btnDisturb    = new Button("Disturb (+Nm)", 0,0, 160,40);
@@ -102,13 +133,41 @@ void setup() {
   // Plots
   plot = new Plot(0,0, 700,260, 2400); plot.windowSeconds = 10; // rolling 10s window
   bode = new BodePlot();
+  nyquist = new NyquistPlot();
   hud = new HUD();
 
   layoutUI();
 }
 
 void draw() {
-  if (width != lastW || height != lastH) { layoutUI(); lastW = width; lastH = height; }
+  // Native Windows maximize/restore may produce several intermediate sizes.
+  // Do not draw the full GUI until the Processing drawable size has remained
+  // unchanged for a few frames.
+  if (width != observedW || height != observedH) {
+    observedW = width;
+    observedH = height;
+    resizeStableFrames = 0;
+    background(12,14,20);
+    return;
+  }
+
+  if (resizeStableFrames < RESIZE_SETTLE_FRAMES) {
+    resizeStableFrames++;
+    background(12,14,20);
+    return;
+  }
+
+  // During minimize the drawable area can be momentarily tiny.
+  if (width < 320 || height < 240) {
+    background(12,14,20);
+    return;
+  }
+
+  if (width != lastW || height != lastH) {
+    layoutUI();
+    lastW = width;
+    lastH = height;
+  }
   background(12,14,20);
 
   // --- Update setpoint from generator (if active) ---
@@ -148,90 +207,314 @@ void draw() {
   drawPanel();
   plot.draw();
   bode.draw();
+  nyquist.draw();
   hud.draw(plot);
   drawFooter();
 }
 
 // ---------- Fullscreen / Window helpers ----------
-void centerWindow(int w, int h) { surface.setLocation((displayWidth - w)/2, (displayHeight - h)/2); }
-void applyWindowMode() { if (fillScreenToggle) { surface.setSize(displayWidth, displayHeight); surface.setLocation(0, 0); cursor(); } else { surface.setSize(WINDOW_W, WINDOW_H); centerWindow(WINDOW_W, WINDOW_H); } layoutUI(); }
+// getMaximumWindowBounds() is the usable Windows desktop area with taskbar
+// space removed.  Unlike the prior version, we do NOT call setMaximizedBounds(),
+// setExtendedState(), or Frame.setBounds(); those native AWT operations can race
+// Processing's drawing surface during maximize/restore.
+Rectangle getUsableDesktopBounds() {
+  try {
+    return GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds();
+  } catch (Exception e) {
+    return new Rectangle(0, 0, displayWidth, displayHeight);
+  }
+}
+
+Frame getNativeFrame() {
+  try {
+    Object nativeSurface = surface.getNative();
+    if (nativeSurface instanceof PSurfaceAWT.SmoothCanvas) {
+      return ((PSurfaceAWT.SmoothCanvas)nativeSurface).getFrame();
+    }
+  } catch (Exception e) {
+    println("Window-frame lookup warning: " + e.getMessage());
+  }
+  return null;
+}
+
+void centerWindow(int contentW, int contentH) {
+  Rectangle work = getUsableDesktopBounds();
+  Frame frame = getNativeFrame();
+
+  int outerW = contentW;
+  int outerH = contentH;
+  if (frame != null) {
+    Insets in = frame.getInsets();
+    outerW += in.left + in.right;
+    outerH += in.top + in.bottom;
+  }
+
+  int x = work.x + max(0, (work.width  - outerW) / 2);
+  int y = work.y + max(0, (work.height - outerH) / 2);
+  surface.setLocation(x, y);
+}
+
+void applyWindowMode() {
+  lastWindowToggleMs = millis();
+
+  Rectangle work = getUsableDesktopBounds();
+  Frame frame = getNativeFrame();
+
+  if (fillScreenToggle) {
+    // Save the current *content* size and outer-window location.
+    savedContentW = max(640, width);
+    savedContentH = max(480, height);
+    if (frame != null) {
+      savedWindowX = frame.getX();
+      savedWindowY = frame.getY();
+    }
+
+    // Compute a taskbar-safe Processing content size by subtracting title-bar
+    // and border insets from the usable outer desktop bounds.
+    int insetLR = 0;
+    int insetTB = 0;
+    if (frame != null) {
+      Insets in = frame.getInsets();
+      insetLR = in.left + in.right;
+      insetTB = in.top + in.bottom;
+    }
+
+    int safeW = max(640, work.width  - insetLR);
+    int safeH = max(480, work.height - insetTB);
+
+    // Use Processing's supported surface API only.
+    surface.setSize(safeW, safeH);
+    surface.setLocation(work.x, work.y);
+  } else {
+    // Restore through the same Processing surface API.  Do not touch the
+    // native maximize state or native frame bounds.
+    int restoreW = max(640, savedContentW);
+    int restoreH = max(480, savedContentH);
+    surface.setSize(restoreW, restoreH);
+
+    if (savedWindowX >= 0 && savedWindowY >= 0) {
+      surface.setLocation(savedWindowX, savedWindowY);
+    } else {
+      centerWindow(restoreW, restoreH);
+    }
+  }
+
+  // Force a clean layout rebuild only after the new drawable size settles.
+  observedW = -1;
+  observedH = -1;
+  resizeStableFrames = 0;
+  lastW = -1;
+  lastH = -1;
+  cursor();
+}
 
 // ---------- Layout + Scroll ----------
 void layoutUI() {
-  // allow smaller UI when the window is short
-  uiScale = constrain(min(width, height) / 900.0, 0.70, 1.4);
-  panelX = 26 * uiScale; panelY = 30 * uiScale; panelW = constrain(width * 0.24, 280 * uiScale, 430 * uiScale);
+  // Scale text and controls, but do not compress rows until they become unreadable.
+  uiScale = constrain(min(width, height) / 900.0, 0.75, 1.35);
 
-  float w = panelW - 52*uiScale, h = 40*uiScale, s = 56*uiScale; // one row per control
-  int items = 23; // fields + buttons including bode (+1 for Arm Length)
+  panelX = 24 * uiScale;
+  panelY = 30 * uiScale;
+  panelW = constrain(width * 0.24, 300 * uiScale, 430 * uiScale);
 
-  float bottomMargin = 40*uiScale; 
-  float needed = (items-1)*s + h; 
-  float avail = height - bottomMargin - panelY; 
-  // compact spacing if needed
-  if (needed > avail) { float factor = max(0.45, avail/needed); s *= factor; h *= max(0.80, factor); }
+  float footerH = 30 * uiScale;
+  panelViewTop = panelY;
+  panelViewBottom = height - footerH - 8 * uiScale;
+  panelViewH = max(120 * uiScale, panelViewBottom - panelViewTop);
 
-  // compute scroll bounds
-  needed = (items-1)*s + h; // recompute after compaction
-  panelScrollMin = min(0, avail - needed);
+  float rowH = 38 * uiScale;
+  float rowGap = 7 * uiScale;
+  float sectionGap = 10 * uiScale;
+  float w = panelW - 18 * uiScale;  // leave room for the scrollbar
+
+  // 16 fields + 8 buttons = 24 rows.  There are 6 larger section breaks.
+  int itemCount = 24;
+  int normalGaps = itemCount - 1;
+  int sectionBreaks = 6;
+  panelContentH = itemCount * rowH + normalGaps * rowGap + sectionBreaks * sectionGap;
+
+  panelScrollMin = min(0, panelViewH - panelContentH);
   panelScroll = constrain(panelScroll, panelScrollMin, 0);
 
-  float x = panelX, y0 = panelY + panelScroll; float y = y0, colX = x;
+  panelScrollBarW = max(7 * uiScale, 5);
+  panelScrollBarX = panelX + panelW - panelScrollBarW;
+
+  float x = panelX;
+  float y = panelViewTop + panelScroll;
 
   // Fields
-  fKp.setPos(colX, y, w, h); y += s; fKi.setPos(colX, y, w, h); y += s; fKd.setPos(colX, y, w, h); y += s + 8*uiScale;
-  fTarget.setPos(colX, y, w, h); y += s + 8*uiScale;
-  fArmLen.setPos(colX, y, w, h); y += s;
-  fMass.setPos(colX, y, w, h); y += s; fPayload.setPos(colX, y, w, h); y += s; fPayloadDist.setPos(colX, y, w, h); y += s; fDrag.setPos(colX, y, w, h); y += s; fSpring.setPos(colX, y, w, h); y += s; fTlim.setPos(colX, y, w, h); y += s + 8*uiScale;
+  fKp.setPos(x, y, w, rowH); y += rowH + rowGap;
+  fKi.setPos(x, y, w, rowH); y += rowH + rowGap;
+  fKd.setPos(x, y, w, rowH); y += rowH + rowGap + sectionGap;
 
-  // Setpoint
-  fAmp.setPos(colX, y, w, h); y += s; fFreq.setPos(colX, y, w, h); y += s; fCenter.setPos(colX, y, w, h); y += s + 8*uiScale;
+  fTarget.setPos(x, y, w, rowH); y += rowH + rowGap + sectionGap;
 
-  // Bode ranges
-  fBodeFreq.setPos(colX, y, w, h); y += s; fBodeAngle.setPos(colX, y, w, h); y += s + 8*uiScale;
+  fArmLen.setPos(x, y, w, rowH); y += rowH + rowGap;
+  fMass.setPos(x, y, w, rowH); y += rowH + rowGap;
+  fPayload.setPos(x, y, w, rowH); y += rowH + rowGap;
+  fPayloadDist.setPos(x, y, w, rowH); y += rowH + rowGap;
+  fDrag.setPos(x, y, w, rowH); y += rowH + rowGap;
+  fSpring.setPos(x, y, w, rowH); y += rowH + rowGap;
+  fTlim.setPos(x, y, w, rowH); y += rowH + rowGap + sectionGap;
+
+  // Setpoint generator
+  fAmp.setPos(x, y, w, rowH); y += rowH + rowGap;
+  fFreq.setPos(x, y, w, rowH); y += rowH + rowGap;
+  fCenter.setPos(x, y, w, rowH); y += rowH + rowGap + sectionGap;
+
+  // Frequency-response controls
+  fBodeFreq.setPos(x, y, w, rowH); y += rowH + rowGap;
+  fBodeAngle.setPos(x, y, w, rowH); y += rowH + rowGap + sectionGap;
 
   // Buttons
-  btnStepUp.setPos(colX, y, w, h); y += s; btnStepDown.setPos(colX, y, w, h); y += s; btnSineToggle.setPos(colX, y, w, h); y += s + 8*uiScale;
-  btnRunBode.setPos(colX, y, w, h); y += s; btnReset.setPos(colX, y, w, h); y += s; btnZeroI.setPos(colX, y, w, h); y += s; btnDisturb.setPos(colX, y, w, h); y += s;
+  btnStepUp.setPos(x, y, w, rowH); y += rowH + rowGap;
+  btnStepDown.setPos(x, y, w, rowH); y += rowH + rowGap;
+  btnSineToggle.setPos(x, y, w, rowH); y += rowH + rowGap + sectionGap;
 
-  // Plots on right: time plot on top, bode at bottom
-  float rightX = panelX + panelW + 26*uiScale; float rightW = max(560*uiScale, width - rightX - 26*uiScale);
-  float topH = max(240*uiScale, height * 0.32); plot.setRect(rightX, 18*uiScale, rightW, topH); plot.lineWeight = 2.4 * uiScale; plot.gridWeight = 1.2 * uiScale; plot.textSize = 12 * uiScale; plot.labelPadding = 8 * uiScale;
+  btnRunBode.setPos(x, y, w, rowH); y += rowH + rowGap;
+  btnNyquistMode.setPos(x, y, w, rowH); y += rowH + rowGap;
+  btnReset.setPos(x, y, w, rowH); y += rowH + rowGap;
+  btnZeroI.setPos(x, y, w, rowH); y += rowH + rowGap;
+  btnDisturb.setPos(x, y, w, rowH);
 
-  float bodeH = max(220*uiScale, height * 0.28); bode.setRect(rightX, 22*uiScale + topH, rightW, bodeH);
+  // Right-side plots
+  float rightX = panelX + panelW + 26 * uiScale;
+  float rightW = max(440 * uiScale, width - rightX - 24 * uiScale);
+
+  float topH = max(235 * uiScale, height * 0.30);
+  plot.setRect(rightX, 18 * uiScale, rightW, topH);
+  plot.lineWeight = 2.4 * uiScale;
+  plot.gridWeight = 1.2 * uiScale;
+  plot.textSize = 12 * uiScale;
+  plot.labelPadding = 8 * uiScale;
+
+  // Bode and Nyquist share the frequency-response row.
+  float freqY = plot.y + topH + 12 * uiScale;
+  float freqH = max(220 * uiScale, min(height * 0.29, 290 * uiScale));
+  float freqGap = 12 * uiScale;
+  float nyqW = constrain(rightW * 0.36, 250 * uiScale, 360 * uiScale);
+  float bodeW = max(300 * uiScale, rightW - nyqW - freqGap);
+
+  bode.setRect(rightX, freqY, bodeW, freqH);
+  nyquist.setRect(rightX + bodeW + freqGap, freqY, nyqW, freqH);
 
   // HUD near top plot
-  hud.x = rightX + rightW - 310*uiScale; hud.y = plot.y + 10*uiScale; hud.w = 300*uiScale; hud.h = 170*uiScale; hud.textSize = 12*uiScale;
+  hud.x = rightX + rightW - 310 * uiScale;
+  hud.y = plot.y + 10 * uiScale;
+  hud.w = 300 * uiScale;
+  hud.h = 170 * uiScale;
+  hud.textSize = 12 * uiScale;
 
-  // Arm area center lower-right
-  armCX = rightX + rightW * 0.52; armCY = max(plot.y + topH + bodeH*0.35, height * 0.70); pxScale = min(width, height) * 0.46;
+  // Arm area below the frequency-response plots; reserve the footer strip.
+  float armTop = freqY + freqH + 10 * uiScale;
+  float armBottom = height - footerH - 6 * uiScale;
+  float armAvail = max(90 * uiScale, armBottom - armTop);
+  armCX = rightX + rightW * 0.55;
+  armCY = armTop + armAvail * 0.50;
+  pxScale = min(rightW * 0.56, max(300 * uiScale, armAvail * 1.45));
+}
+
+float panelThumbH() {
+  if (panelContentH <= panelViewH) return panelViewH;
+  return max(36 * uiScale, panelViewH * (panelViewH / panelContentH));
+}
+
+float panelThumbY() {
+  if (panelScrollMin >= 0) return panelViewTop;
+  float travel = max(1, panelViewH - panelThumbH());
+  float frac = constrain(panelScroll / panelScrollMin, 0, 1); // negative/negative -> 0..1
+  return panelViewTop + frac * travel;
+}
+
+void setPanelScrollFromThumb(float thumbTop) {
+  if (panelScrollMin >= 0) return;
+  float travel = max(1, panelViewH - panelThumbH());
+  float frac = constrain((thumbTop - panelViewTop) / travel, 0, 1);
+  panelScroll = panelScrollMin * frac;
+  layoutUI(); // scrolling changes every control's screen position
 }
 
 void mouseWheel(MouseEvent evt){
-  // scroll only when pointer is on the left panel region
-  if (mouseX >= panelX && mouseX <= panelX + panelW) {
-    float e = evt.getCount();
-    panelScroll = constrain(panelScroll - e * 22, panelScrollMin, 0);
+  if (mouseX >= panelX && mouseX <= panelX + panelW &&
+      mouseY >= panelViewTop && mouseY <= panelViewBottom) {
+    panelScroll = constrain(panelScroll - evt.getCount() * 34 * uiScale, panelScrollMin, 0);
+    layoutUI(); // important: immediately move the controls after changing scroll
   }
 }
 
 // ---------- Input ----------
 void mousePressed() {
-  for (InputField f : fields) f.onMouse(mouseX, mouseY);
+  boolean inPanelView = (mouseX >= panelX && mouseX <= panelX + panelW &&
+                         mouseY >= panelViewTop && mouseY <= panelViewBottom);
+
+  // Scrollbar: drag the thumb or click the track to jump.
+  if (inPanelView && panelScrollMin < 0 &&
+      mouseX >= panelScrollBarX - 3*uiScale && mouseX <= panelX + panelW + 2*uiScale) {
+    float th = panelThumbH();
+    float ty = panelThumbY();
+    if (mouseY >= ty && mouseY <= ty + th) {
+      panelScrollDragging = true;
+      panelScrollDragOffset = mouseY - ty;
+    } else {
+      setPanelScrollFromThumb(mouseY - th/2);
+    }
+    for (InputField f : fields) f.active = false;
+    return;
+  }
+
+  // Hidden/scrolled-off controls are never allowed to receive clicks.
+  for (InputField f : fields) {
+    if (inPanelView) f.onMouse(mouseX, mouseY);
+    else f.active = false;
+  }
+
+  if (!inPanelView) return;
+
   if (btnReset.hit(mouseX, mouseY)) resetSim();
   if (btnZeroI.hit(mouseX, mouseY)) pid.integral = 0;
   if (btnDisturb.hit(mouseX, mouseY)) sim.impulse(1.5);
 
-  if (btnStepUp.hit(mouseX, mouseY)) { if (sineOn) { centerDeg += 10; fCenter.text = nf(centerDeg,0,2); } else { sim.targetDeg += 10; fTarget.text = nf(sim.targetDeg,0,2); } }
-  if (btnStepDown.hit(mouseX, mouseY)) { if (sineOn) { centerDeg -= 10; fCenter.text = nf(centerDeg,0,2); } else { sim.targetDeg -= 10; fTarget.text = nf(sim.targetDeg,0,2); } }
-  if (btnSineToggle.hit(mouseX, mouseY)) { sineOn = !sineOn; btnSineToggle.label = sineOn ? "Sine: ON" : "Sine: OFF"; if (sineOn) { centerDeg = parseSafe(fCenter.text, centerDeg); } }
+  if (btnStepUp.hit(mouseX, mouseY)) {
+    if (sineOn) { centerDeg += 10; fCenter.text = nf(centerDeg,0,2); }
+    else { sim.targetDeg += 10; fTarget.text = nf(sim.targetDeg,0,2); }
+  }
+  if (btnStepDown.hit(mouseX, mouseY)) {
+    if (sineOn) { centerDeg -= 10; fCenter.text = nf(centerDeg,0,2); }
+    else { sim.targetDeg -= 10; fTarget.text = nf(sim.targetDeg,0,2); }
+  }
+  if (btnSineToggle.hit(mouseX, mouseY)) {
+    sineOn = !sineOn;
+    btnSineToggle.label = sineOn ? "Sine: ON" : "Sine: OFF";
+    if (sineOn) centerDeg = parseSafe(fCenter.text, centerDeg);
+  }
   if (btnRunBode.hit(mouseX, mouseY)) runBode();
+  if (btnNyquistMode.hit(mouseX, mouseY)) {
+    nyquist.showClosedLoop = !nyquist.showClosedLoop;
+    btnNyquistMode.label = nyquist.showClosedLoop ? "Nyquist: CLOSED LOOP" : "Nyquist: OPEN LOOP";
+  }
+}
+
+void mouseDragged() {
+  if (panelScrollDragging) {
+    setPanelScrollFromThumb(mouseY - panelScrollDragOffset);
+  }
+}
+
+void mouseReleased() {
+  panelScrollDragging = false;
 }
 
 void keyTyped() { for (InputField f : fields) if (f.active) { f.onKeyTyped(key, keyCode); if (key == ENTER || key == RETURN) f.active = false; } }
 void keyPressed() {
   if (key == ESC) { key = 0; return; } if (key == 'q' || key == 'Q') exit();
-  if ((key == 'f' || key == 'F') && !fLatch) { fLatch = true; fillScreenToggle = !fillScreenToggle; applyWindowMode(); return; }
+  if ((key == 'f' || key == 'F') && !fLatch) {
+    fLatch = true;
+    if (millis() - lastWindowToggleMs >= 300) {
+      fillScreenToggle = !fillScreenToggle;
+      applyWindowMode();
+    }
+    return;
+  }
   for (InputField f : fields) { if (!f.active) continue; if (keyCode == BACKSPACE) { if (f.text.length() > 0) f.text = f.text.substring(0, f.text.length()-1); return; } if (keyCode == DELETE) { f.text = ""; return; } if (keyCode == ENTER || key == RETURN) { f.active = false; return; } }
 }
 void keyReleased() { if (key == 'f' || key == 'F') fLatch = false; }
@@ -276,28 +559,87 @@ void drawArm(ArmSim s) {
 }
 
 void drawPanel() {
-  // panel clip to keep text inside when scrolled
-  clip((int)panelX-2, (int)panelY-2, (int)panelW+4, (int)(height - panelY - 20));
+  pushStyle();
+
+  // The left controls live in a true viewport.  Do not use nested clip()/noClip()
+  // calls inside InputField.draw(), because Processing's clip state is not stacked.
+  noStroke();
+  fill(16,18,24);
+  rect(panelX-4*uiScale, panelViewTop-4*uiScale, panelW+8*uiScale, panelViewH+8*uiScale, 6*uiScale);
+
+  clip((int)panelX-2, (int)panelViewTop, (int)panelW+4, (int)panelViewH);
   for (InputField f : fields) f.draw();
-  btnStepUp.draw(); btnStepDown.draw(); btnSineToggle.draw(); btnRunBode.draw();
-  btnReset.draw(); btnZeroI.draw(); btnDisturb.draw();
+  btnStepUp.draw();
+  btnStepDown.draw();
+  btnSineToggle.draw();
+  btnRunBode.draw();
+  btnNyquistMode.draw();
+  btnReset.draw();
+  btnZeroI.draw();
+  btnDisturb.draw();
   noClip();
 
-  fill(255); textAlign(LEFT, TOP); textSize(12*uiScale); text("Plot: angle vs time (last 10 s)", plot.x, plot.y - 18*uiScale);
-  // Legend tucked **inside** the plot, top-right (never off-screen)
-float legW = 170*uiScale;
-float legX = plot.x + plot.w - legW - 12*uiScale;
-float legY = plot.y + 12*uiScale;
-strokeWeight(4*uiScale); stroke(120,200,255); line(legX, legY, legX+36*uiScale, legY); noStroke(); fill(200); textAlign(LEFT, CENTER); text("current", legX+44*uiScale, legY);
-strokeWeight(4*uiScale); stroke(255,120,160); line(legX, legY + 12*uiScale, legX+36*uiScale, legY + 12*uiScale); noStroke(); fill(200); text("target", legX+44*uiScale, legY + 12*uiScale);
+  // Visible scrollbar
+  if (panelScrollMin < 0) {
+    float th = panelThumbH();
+    float ty = panelThumbY();
+    noStroke();
+    fill(55,60,72,190);
+    rect(panelScrollBarX, panelViewTop, panelScrollBarW, panelViewH, panelScrollBarW/2);
+    fill(panelScrollDragging ? color(150,210,255) : color(115,130,155));
+    rect(panelScrollBarX, ty, panelScrollBarW, th, panelScrollBarW/2);
 
-  // hint for scrolling (only when everything fits)
-  if (panelScrollMin == 0) {
-    fill(170); textSize(11*uiScale); text("Mouse‑wheel over left panel to scroll", panelX, panelY - 14*uiScale);
+    fill(180);
+    textAlign(LEFT, BOTTOM);
+    textSize(11*uiScale);
+    text("Mouse wheel or drag scrollbar", panelX, panelY - 5*uiScale);
   }
+
+  // Time-plot title and legend
+  fill(255);
+  textAlign(LEFT, TOP);
+  textSize(12*uiScale);
+  text("Plot: angle vs time (last 10 s)", plot.x, plot.y - 16*uiScale);
+
+float legW = 170*uiScale;
+
+// Center the entire legend horizontally in the plot
+float legX = plot.x + (plot.w - legW)/2.0;
+
+float legY = plot.y + 12*uiScale;
+
+  strokeWeight(4*uiScale);
+  stroke(120,200,255);
+  line(legX, legY, legX+36*uiScale, legY);
+  noStroke();
+  fill(200);
+  textAlign(LEFT, CENTER);
+  text("current", legX+44*uiScale, legY);
+
+  strokeWeight(4*uiScale);
+  stroke(255,120,160);
+  line(legX, legY + 12*uiScale, legX+36*uiScale, legY + 12*uiScale);
+  noStroke();
+  fill(200);
+  text("target", legX+44*uiScale, legY + 12*uiScale);
+
+  popStyle();
 }
 
-void drawFooter() { fill(200); textAlign(LEFT, BOTTOM); textSize(12*uiScale); text("F: toggle fill‑screen  •  Q: quit  •  Click a box → type → Enter", plot.x, height-12*uiScale); }
+void drawFooter() {
+  pushStyle();
+  float footerH = 30*uiScale;
+  noStroke();
+  fill(12,14,20,245);
+  rect(plot.x, height-footerH, width-plot.x, footerH);
+
+  fill(200);
+  textAlign(LEFT, CENTER);
+  textSize(12*uiScale);
+  text("F: fit/restore usable screen  •  Q: quit  •  Click a box → type → Enter",
+       plot.x + 6*uiScale, height-footerH/2);
+  popStyle();
+}
 
 // ---------- Model ----------
 class ArmSim { 
@@ -408,7 +750,7 @@ for (float ts = firstTick; ts <= tLast; ts += stepT) {
 float niceStep(float range){ float rough = range/6.0; float pow10 = pow(10, floor(log10f(max(1e-6, rough)))); float base = rough / pow10; float mult = (base<=1.2)?1:(base<=2.5)?2:(base<=5.5)?5:10; return mult * pow10; }
 
 class BodePlot {
-  float x, y, w, h; float textSize=12; float lineW=2.2; float gridW=1.1; boolean hasData=false; float[] fHz, magPlant, phaPlant, magCL, phaCL; // arrays
+  float x, y, w, h; float textSize=12; float lineW=2.2; float gridW=1.1; boolean hasData=false; float linAngleDeg=0; float[] fHz, magPlant, phaPlant, magCL, phaCL; // arrays
   void setRect(float X,float Y,float W,float H){ x=X; y=Y; w=W; h=H; }
   void draw(){
     pushStyle();
@@ -416,7 +758,7 @@ class BodePlot {
     noStroke(); fill(18,20,26); rect(x, y, w, h);
     // Frame & title
     noFill(); stroke(220,230,240,160); strokeWeight(1.2*uiScale); rect(x, y, w, h, 6*uiScale);
-    fill(200); textAlign(LEFT, TOP); textSize(12*uiScale); text("Bode: mag (dB) & phase (deg)", x+8*uiScale, y+6*uiScale);
+    fill(200); textAlign(LEFT, TOP); textSize(12*uiScale); text("Bode: G(jω) and T(jω)  •  linearized at θ = " + nf(linAngleDeg,0,1) + "°", x+8*uiScale, y+6*uiScale);
     if (!hasData) { fill(170); text("Click 'Run Bode' to compute using current parameters", x+8*uiScale, y+28*uiScale); popStyle(); return; }
 
     float top = y + 30*uiScale; float mid = y + h*0.55; float bot = y + h - 24*uiScale; // two panels
@@ -462,36 +804,289 @@ stroke(120,200,255); beginShape(); for (int i=0;i<fHz.length;i++){ float xx=mapL
   }
 }
 
-void runBode(){
-  // Parse ranges
-  Range fr = parseRange(fBodeFreq.text, 0.01, 100.0); Range ar = parseRange(fBodeAngle.text, 0.5, 30.0);
-  int N = 200; float[] f = new float[N]; // log-spaced
-  float fmin=max(1e-3, fr.lo), fmax=max(fmin*1.01, fr.hi); for (int i=0;i<N;i++){ float t=i/(float)(N-1); f[i]=exp(log(fmin)*(1-t) + log(fmax)*t); }
 
-  // Plant params
-  float I=sim.inertia(); float b=sim.drag; float th0 = radians(sim.targetDeg);
-  // Small-signal stiffness about current target: spring − d(τ_g)/dθ = spring − K_g sin(θ0)
-  float k = sim.springK - sim.gravityK() * sin(th0);
-  // PID params in s-domain; derivative LPF time constant from discrete alpha
-  float dt=1.0/120.0; float alpha = clamp(pid.derivLPF, 1e-4, 0.999f); float Tf = dt/alpha; // approx RC
+// ---------- Nyquist plot: selectable open-loop L(jw) or closed-loop T(jw) ----------
+class NyquistPlot {
+  float x, y, w, h;
+  float lineW=2.0, gridW=1.0;
+  boolean hasData=false;
+  boolean showClosedLoop=false;
+  float linAngleDeg=0;
+  float[] fHz;
+  float[] reOpen, imOpen;
+  float[] reClosed, imClosed;
 
-  // Arrays
-  float[] magP=new float[N], phaP=new float[N], magC=new float[N], phaC=new float[N];
-
-  for (int i=0;i<N;i++){
-    float w = TWO_PI * f[i]; Complex s = new Complex(0, w);
-    // G(s) = 1 / (I s^2 + b s + k)
-    Complex denom = s.mul(s).mul(I).add(s.mul(b)).add(new Complex(k,0)); Complex G = new Complex(1,0).div(denom);
-    // PID(s)
-    Complex PID = new Complex(pid.Kp,0).add(new Complex(pid.Ki,0).div(s)).add(new Complex(pid.Kd,0).mul(s).div(new Complex(1,0).add(s.mul(Tf))));
-    // Closed-loop T(s) = (PID*G) / (1 + PID*G)
-    Complex L = PID.mul(G); Complex T = L.div(new Complex(1,0).add(L));
-    // Record mag/phase
-    magP[i] = 20*log10f(G.abs()); phaP[i] = degrees(G.arg());
-    magC[i] = 20*log10f(T.abs()); phaC[i] = degrees(T.arg());
+  void setRect(float X, float Y, float W, float H){
+    x=X; y=Y; w=W; h=H;
   }
 
-  bode.fHz=f; bode.magPlant=magP; bode.phaPlant=phaP; bode.magCL=magC; bode.phaCL=phaC; bode.hasData=true;
+  void draw(){
+    pushStyle();
+
+    noStroke();
+    fill(18,20,26);
+    rect(x, y, w, h);
+
+    noFill();
+    stroke(220,230,240,160);
+    strokeWeight(1.2*uiScale);
+    rect(x, y, w, h, 6*uiScale);
+
+    float[] reData = showClosedLoop ? reClosed : reOpen;
+    float[] imData = showClosedLoop ? imClosed : imOpen;
+    String symbol = showClosedLoop ? "T" : "L";
+    String modeText = showClosedLoop ? "closed-loop T(jω)" : "open-loop L(jω)";
+
+    fill(200);
+    textAlign(LEFT, TOP);
+    textSize(12*uiScale);
+    text("Nyquist: " + modeText, x+8*uiScale, y+6*uiScale);
+
+    if (!hasData || reData == null || imData == null || reData.length < 2) {
+      fill(170);
+      text("Click 'Run Bode' to compute", x+8*uiScale, y+28*uiScale);
+      popStyle();
+      return;
+    }
+
+    float left = x + 46*uiScale;
+    float right = x + w - 14*uiScale;
+    float top = y + 34*uiScale;
+    float bottom = y + h - 34*uiScale;
+
+    // For open loop, always include the classical -1+j0 critical point.
+    // For closed loop, scale only to T(jw) and the origin.
+    float reMin = showClosedLoop ? 0.0 : -1.0;
+    float reMax = 0.0;
+    float imAbs = 0.0;
+
+    for (int i=0; i<reData.length; i++){
+      if (!Float.isFinite(reData[i]) || !Float.isFinite(imData[i])) continue;
+      reMin = min(reMin, reData[i]);
+      reMax = max(reMax, reData[i]);
+      imAbs = max(imAbs, abs(imData[i]));
+    }
+
+    float reRange = max(1e-4, reMax - reMin);
+    float rePad = max(0.18, 0.10*reRange);
+    reMin -= rePad;
+    reMax += rePad;
+    imAbs = max(0.25, imAbs*1.12);
+
+    // Keep approximately equal real/imaginary scale so loops do not look distorted.
+    float pxW = max(1, right-left);
+    float pxH = max(1, bottom-top);
+    float desiredImRange = (reMax-reMin) * (pxH/pxW);
+    float imRange = 2*imAbs;
+    if (imRange < desiredImRange) imAbs = desiredImRange/2;
+    else {
+      float desiredReRange = imRange * (pxW/pxH);
+      float extra = desiredReRange - (reMax-reMin);
+      if (extra > 0) { reMin -= extra/2; reMax += extra/2; }
+    }
+
+    float imMin = -imAbs;
+    float imMax = imAbs;
+
+    // Background
+    noStroke();
+    fill(24,28,36);
+    rect(left, top, right-left, bottom-top);
+
+    // Grid with readable "nice" spacing
+    float stepX = niceStep(reMax-reMin);
+    float stepY = niceStep(imMax-imMin);
+
+    stroke(120,130,150,55);
+    strokeWeight(gridW*uiScale);
+
+    float firstX = ceil(reMin/stepX)*stepX;
+    for (float rv=firstX; rv<=reMax+0.5*stepX; rv+=stepX) {
+      float xx = map(rv, reMin, reMax, left, right);
+      line(xx, top, xx, bottom);
+    }
+
+    float firstY = ceil(imMin/stepY)*stepY;
+    for (float iv=firstY; iv<=imMax+0.5*stepY; iv+=stepY) {
+      float yy = map(iv, imMin, imMax, bottom, top);
+      line(left, yy, right, yy);
+    }
+
+    // Real and imaginary axes
+    stroke(175,185,205,135);
+    strokeWeight(1.4*uiScale);
+    if (0 >= reMin && 0 <= reMax) {
+      float x0 = map(0, reMin, reMax, left, right);
+      line(x0, top, x0, bottom);
+    }
+    if (0 >= imMin && 0 <= imMax) {
+      float y0 = map(0, imMin, imMax, bottom, top);
+      line(left, y0, right, y0);
+    }
+
+    // Tick labels
+    fill(180);
+    textSize(10.5*uiScale);
+    textAlign(CENTER, TOP);
+    for (float rv=firstX; rv<=reMax+0.5*stepX; rv+=stepX) {
+      float xx = map(rv, reMin, reMax, left, right);
+      text(nf(rv,0,(abs(stepX)<1)?1:0), xx, bottom+3*uiScale);
+    }
+    textAlign(RIGHT, CENTER);
+    for (float iv=firstY; iv<=imMax+0.5*stepY; iv+=stepY) {
+      if (abs(iv) < 0.25*stepY) continue;
+      float yy = map(iv, imMin, imMax, bottom, top);
+      text(nf(iv,0,(abs(stepY)<1)?1:0), left-5*uiScale, yy);
+    }
+
+    // Negative-frequency branch is the conjugate of the positive-frequency branch
+    // for this real-coefficient system.
+    noFill();
+    stroke(160,170,190);
+    strokeWeight(lineW*uiScale);
+    beginShape();
+    for (int i=reData.length-1; i>=0; i--) {
+      if (!Float.isFinite(reData[i]) || !Float.isFinite(imData[i])) continue;
+      vertex(map(reData[i], reMin, reMax, left, right),
+             map(-imData[i], imMin, imMax, bottom, top));
+    }
+    endShape();
+
+    // Positive-frequency branch
+    stroke(120,200,255);
+    strokeWeight(lineW*uiScale);
+    beginShape();
+    for (int i=0; i<reData.length; i++) {
+      if (!Float.isFinite(reData[i]) || !Float.isFinite(imData[i])) continue;
+      vertex(map(reData[i], reMin, reMax, left, right),
+             map(imData[i], imMin, imMax, bottom, top));
+    }
+    endShape();
+
+    // The -1+j0 critical point belongs to the classical open-loop Nyquist criterion.
+    // Do not show it on the closed-loop T(jw) view, where it would be misleading.
+    if (!showClosedLoop) {
+      float critX = map(-1, reMin, reMax, left, right);
+      float critY = map(0, imMin, imMax, bottom, top);
+      stroke(255,150,110);
+      strokeWeight(2*uiScale);
+      line(critX-5*uiScale, critY-5*uiScale, critX+5*uiScale, critY+5*uiScale);
+      line(critX-5*uiScale, critY+5*uiScale, critX+5*uiScale, critY-5*uiScale);
+      noStroke();
+      fill(255,180,140);
+      textAlign(LEFT, BOTTOM);
+      textSize(10.5*uiScale);
+      text("-1 + j0", critX+6*uiScale, critY-3*uiScale);
+    }
+
+    // Start/end markers on the +w branch
+    noStroke();
+    fill(120,200,255);
+    float sx = map(reData[0], reMin, reMax, left, right);
+    float sy = map(imData[0], imMin, imMax, bottom, top);
+    ellipse(sx, sy, 6*uiScale, 6*uiScale);
+    float ex = map(reData[reData.length-1], reMin, reMax, left, right);
+    float ey = map(imData[imData.length-1], imMin, imMax, bottom, top);
+    ellipse(ex, ey, 6*uiScale, 6*uiScale);
+
+    fill(190);
+    textSize(10.5*uiScale);
+    textAlign(CENTER, TOP);
+    text("Re{" + symbol + "}", (left+right)/2, y+h-18*uiScale);
+    textAlign(LEFT, TOP);
+    text("Im{" + symbol + "}", x+5*uiScale, top);
+
+    fill(175);
+    textAlign(LEFT, BOTTOM);
+    textSize(10*uiScale);
+    text("+ω: blue  •  −ω: gray  •  θlin=" + nf(linAngleDeg,0,1) + "°",
+         left, y+h-3*uiScale);
+
+    popStyle();
+  }
+}
+
+void runBode(){
+  // Frequency range is logarithmic.  The linearization angle is a single
+  // operating angle used to linearize the gravity term.
+  Range fr = parseRange(fBodeFreq.text, 0.01, 100.0);
+  float linAngleDeg = parseSafe(fBodeAngle.text, sim.targetDeg);
+
+  int N = 240;
+  float[] f = new float[N];
+  float fmin = max(1e-3, fr.lo);
+  float fmax = max(fmin*1.01, fr.hi);
+  for (int i=0; i<N; i++){
+    float t = i/(float)(N-1);
+    f[i] = exp(log(fmin)*(1-t) + log(fmax)*t);
+  }
+
+  // Small-signal plant around theta0:
+  //   I*d2(delta)/dt2 + b*d(delta)/dt + k_eff*delta = delta(tau)
+  // where k_eff = springK - Kg*sin(theta0)
+  float I = sim.inertia();
+  float b = sim.drag;
+  float th0 = radians(linAngleDeg);
+  float k = sim.springK - sim.gravityK() * sin(th0);
+
+  // PID(s) with the same first-order derivative filtering approximation
+  // used by the original Bode implementation.
+  float dt = 1.0/120.0;
+  float alpha = clamp(pid.derivLPF, 1e-4, 0.999f);
+  float Tf = dt/alpha;
+
+  float[] magP = new float[N];
+  float[] phaP = new float[N];
+  float[] magC = new float[N];
+  float[] phaC = new float[N];
+  float[] reL = new float[N];
+  float[] imL = new float[N];
+  float[] reT = new float[N];
+  float[] imT = new float[N];
+
+  for (int i=0; i<N; i++){
+    float w = TWO_PI * f[i];
+    Complex s = new Complex(0, w);
+
+    // Plant G(s) = 1 / (I*s^2 + b*s + k_eff)
+    Complex denom = s.mul(s).mul(I).add(s.mul(b)).add(new Complex(k,0));
+    Complex G = new Complex(1,0).div(denom);
+
+    // Controller C(s) = Kp + Ki/s + Kd*s/(1 + Tf*s)
+    Complex C = new Complex(pid.Kp,0)
+      .add(new Complex(pid.Ki,0).div(s))
+      .add(new Complex(pid.Kd,0).mul(s).div(new Complex(1,0).add(s.mul(Tf))));
+
+    // Open-loop L(s) and closed-loop T(s)
+    Complex L = C.mul(G);
+    Complex T = L.div(new Complex(1,0).add(L));
+
+    magP[i] = 20*log10f(max(1e-20, G.abs()));
+    phaP[i] = degrees(G.arg());
+    magC[i] = 20*log10f(max(1e-20, T.abs()));
+    phaC[i] = degrees(T.arg());
+
+    reL[i] = L.re;
+    imL[i] = L.im;
+    reT[i] = T.re;
+    imT[i] = T.im;
+  }
+
+  bode.fHz = f;
+  bode.magPlant = magP;
+  bode.phaPlant = phaP;
+  bode.magCL = magC;
+  bode.phaCL = phaC;
+  bode.linAngleDeg = linAngleDeg;
+  bode.hasData = true;
+
+  nyquist.fHz = f;
+  nyquist.reOpen = reL;
+  nyquist.imOpen = imL;
+  nyquist.reClosed = reT;
+  nyquist.imClosed = imT;
+  nyquist.linAngleDeg = linAngleDeg;
+  nyquist.hasData = true;
 }
 
 class Range { float lo, hi; }
@@ -508,24 +1103,46 @@ class InputField {
   InputField(String label, float x, float y, float w, float h, String initial){ this.label=label; setPos(x,y,w,h); this.text=initial; } 
   void setPos(float X,float Y,float W,float H){ x=X; y=Y; w=W; h=H; } 
   void draw(){ 
-    stroke(active ? color(120,200,255) : color(150)); fill(30,35,45); rect(x, y, w, h, 6*uiScale);
-    // Label chip
-    float labelSize = 12*uiScale*0.9; textSize(labelSize); textAlign(LEFT, CENTER); float pad = 6*uiScale; 
-    float chipW = max(62*uiScale, textWidth(label) + 2*pad);
-    noStroke(); fill(42, 48, 62); rect(x, y, chipW, h, 6*uiScale, 0, 0, 6*uiScale); 
-    stroke(70,80,98); line(x+chipW, y, x+chipW, y+h);
-    fill(205); text(label, x + pad, y + h/2);
+    stroke(active ? color(120,200,255) : color(150));
+    fill(30,35,45);
+    rect(x, y, w, h, 6*uiScale);
 
-    // Value text area (clipped + ellipsis if too long)
-    float tStart = x + chipW + 8*uiScale; float availW = w - (tStart - x) - 8*uiScale; 
+    // Label chip.  Cap its width so every field always keeps a readable value area.
+    float labelSize = 11.5*uiScale;
+    textSize(labelSize);
+    textAlign(LEFT, CENTER);
+    float pad = 6*uiScale;
+    float minValueW = 76*uiScale;
+    float maxChipW = max(70*uiScale, w - minValueW);
+    float chipW = min(maxChipW, max(78*uiScale, textWidth(label) + 2*pad));
+    String labelDraw = ellipsize(label, chipW - 2*pad, labelSize);
+
+    noStroke();
+    fill(42,48,62);
+    rect(x, y, chipW, h, 6*uiScale, 0, 0, 6*uiScale);
+    stroke(70,80,98);
+    line(x+chipW, y, x+chipW, y+h);
+
+    fill(205);
+    text(labelDraw, x + pad, y + h/2);
+
+    // Value text uses ellipsis only; no nested clip()/noClip().
+    // That preserves the outer panel clip and prevents bottom-of-screen overlap.
+    float tStart = x + chipW + 8*uiScale;
+    float availW = max(18*uiScale, w - (tStart - x) - 8*uiScale);
     String toDraw = ellipsize(text, availW, 12*uiScale);
-    fill(240); textAlign(LEFT, CENTER); textSize(12*uiScale);
-    clip((int)(tStart), (int)(y+1), (int)(availW), (int)(h-2));
+    fill(240);
+    textAlign(LEFT, CENTER);
+    textSize(12*uiScale);
     text(toDraw, tStart, y + h/2);
-    noClip();
 
     // Caret
-    if (active && (frameCount/30)%2==0){ float twv=textWidth(toDraw); stroke(240); float cx = tStart + min(twv, availW-2); line(cx+2, y+7*uiScale, cx+2, y+h-7*uiScale); }
+    if (active && (frameCount/30)%2==0){
+      float twv = textWidth(toDraw);
+      stroke(240);
+      float cx = tStart + min(twv, availW-3*uiScale);
+      line(cx+2, y+7*uiScale, cx+2, y+h-7*uiScale);
+    }
   } 
   void onMouse(float mx,float my){ active=(mx>=x && mx<=x+w && my>=y && my<=y+h); } 
   void onKeyTyped(char k,int _kc){ if(!active) return; if ((k>='0'&&k<='9')||k=='-'||k=='+'||k=='.'||k=='e'||k=='E') text+=k; } 
