@@ -93,47 +93,36 @@ UI / full window (hero):
 
 ![Full UI window](https://raw.githubusercontent.com/melzein1/PIDSIMULATOR/main/UI-full.png)
 
-Caption: "PID Simulator — controls, realtime time-plot, Bode & Nyquist panels, and visual arm."
+"PID Simulator — controls, realtime time-plot, Bode & Nyquist panels, and visual arm."
 
 Time response (step / sine):
 
 ![Time response (step)](https://raw.githubusercontent.com/melzein1/PIDSIMULATOR/main/resp-step.png)
 
-Caption: "Time response — step / sine response showing system behavior and HUD."
+"Time response — step / sine response showing system behavior and HUD."
 
 Bode (magnitude & phase):
 
 ![Bode: plant and closed-loop](https://raw.githubusercontent.com/melzein1/PIDSIMULATOR/main/Bode.png)
 
-Caption: "Bode plot: plant (gray) and closed-loop (blue) magnitude & phase, linearized at θ = 30°." 
+"Bode plot: plant (gray) and closed-loop (blue) magnitude & phase, linearized at θ = 30°." 
 
 Nyquist (open-loop):
 
 ![Nyquist open-loop](https://raw.githubusercontent.com/melzein1/PIDSIMULATOR/main/Nyquist-open.png)
 
-Caption: "Nyquist (open-loop) — classical -1 + j0 point marked."
+"Nyquist (open-loop) — classical -1 + j0 point marked."
 
 Nyquist (closed-loop):
 
 ![Nyquist closed-loop](https://raw.githubusercontent.com/melzein1/PIDSIMULATOR/main/Nyquist-closed.png)
 
-Caption: "Nyquist (closed-loop) — shows T(jω) loops."
+"Nyquist (closed-loop) — shows T(jω) loops."
 
 Control panel close-up:
 
 ![Control panel close-up](https://raw.githubusercontent.com/melzein1/PIDSIMULATOR/main/controls-closeup.png)
 
-Caption: "Control panel: PID and plant parameters (edit and run)."
+ "Control panel: PID and plant parameters (edit and run)."
 
-## Development notes (for contributors)
-- The entire application is in one .pde file. Refactoring into multiple files (e.g., ArmSim.pde, PID.pde, Plot.pde, UI.pde) would make it easier to maintain and test.
-- The PID derivative uses a simple lerp low‑pass (pid.derivLPF); if you want a time‑constant approach, consider switching to an explicit RC filter using dt.
 
-## Try asking
-- "Where in the code is the plant linearized for the Bode plot?"
-- "How do I change the simulation time step to 1/100 s instead of 1/120 s?"
-- "Can you split the single .pde into multiple files (ArmSim.pde, PID.pde, Plot.pde, UI.pde)?"
-
----
-
-(Updated README to include screenshots and usage notes.)
