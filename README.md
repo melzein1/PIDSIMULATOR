@@ -89,7 +89,7 @@ Notes:
 ## Screenshots and images
 Screenshots are very helpful for newcomers (UI layout, time‑response example, and frequency‑domain plots). Images have been added to the repository; examples below are embedded at full resolution for clarity.
 
-UI / full window (hero):
+UI / full window :
 
 ![Full UI window](https://raw.githubusercontent.com/melzein1/PIDSIMULATOR/main/UI-full.png)
 
