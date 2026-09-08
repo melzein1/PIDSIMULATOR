@@ -93,13 +93,13 @@ UI / full window :
 
 ![Full UI window](https://raw.githubusercontent.com/melzein1/PIDSIMULATOR/main/UI-full.png)
 
-"PID Simulator — controls, realtime time-plot, Bode & Nyquist panels, and visual arm."
+"PID Simulator — controls, realtime time-plot, Bode & Nyquist panels, and visual arm following a sin wave input."
 
-Time response (step / sine):
+Time response (step):
 
 ![Time response (step)](https://raw.githubusercontent.com/melzein1/PIDSIMULATOR/main/resp-step.png)
 
-"Time response — step / sine response showing system behavior and HUD."
+"Time response — step response showing system behavior and HUD."
 
 Bode (magnitude & phase):
 
